@@ -161,21 +161,70 @@ def test_model(model, data_loader, description="Test"):
 # Main Function
 # ==============================================================================
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='PyTorch ImageNet ResNet18 Pre-trained Model Evaluation and Saving')
+    parser = argparse.ArgumentParser(description='PyTorch ImageNet ResNet18 Model Evaluation and Saving')
     parser.add_argument('--data_dir', default='./data/ImageNet2012', type=str, help='Path to ImageNet 2012 dataset root (containing train/val folders)')
     parser.add_argument('--batch_size', default=512, type=int, help='batch size for data loaders')
     parser.add_argument('--num_workers', default=8, type=int, help='number of data loading workers (recommend >= 4 for ImageNet)')
-    parser.add_argument('--save_model', action='store_true', help='Save the loaded pre-trained model after evaluation')
+    parser.add_argument('--save_model', action='store_true', help='Save the loaded model after evaluation')
     parser.add_argument('--save_path', type=str, default='./checkpoint/resnet18_imagenet_pretrained.pth', help='Path to save the pre-trained model')
+    parser.add_argument('--load_checkpoint', type=str, default=None, help='Path to a custom model checkpoint (.pth) to load for testing. If not specified, the default ImageNet pre-trained ResNet18 will be used.')
+    parser.add_argument('--avgpool_replace', action='store_true', help='Replace the initial MaxPool layer with AvgPool for ResNet18. Use this if your checkpoint was trained with this modification.')
     args = parser.parse_args()
 
     # 1. Load Data (Validation Set Only)
     val_loader, num_classes = load_val_data(args)
 
-    # 2. Load Pre-trained ResNet18 Model
-    print("\n--- Loading pre-trained ResNet18 model from torchvision ---")
-    # Using the recommended way to load ImageNet-1K V1 weights
-    model = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
+    # 2. Load Model (Pre-trained or Custom Checkpoint)
+    if args.load_checkpoint:
+        print(f"\n--- Loading model from custom checkpoint: {args.load_checkpoint} ---")
+        # Load a base ResNet18 model first to ensure correct architecture
+        model = models.resnet18(weights=None) # Initialize with no pre-trained weights
+
+        # Apply AvgPool replacement if specified
+        if args.avgpool_replace:
+            print("--- Replacing initial MaxPool layer with AvgPool layer ---")
+            model.maxpool = nn.AvgPool2d(kernel_size=3, stride=2, padding=1)
+        
+        # Load state_dict from checkpoint
+        if not os.path.exists(args.load_checkpoint):
+            raise FileNotFoundError(f"Checkpoint file not found: '{args.load_checkpoint}'")
+        
+        checkpoint = torch.load(args.load_checkpoint, map_location=device)
+        
+        # --- MODIFIED LOGIC HERE ---
+        state_dict = None
+        if isinstance(checkpoint, dict):
+            if 'state_dict' in checkpoint:
+                state_dict = checkpoint['state_dict']
+            elif 'net' in checkpoint: # This is the key observed in your traceback
+                state_dict = checkpoint['net']
+            else:
+                # If it's a dict but neither 'state_dict' nor 'net' is found,
+                # assume the dict itself is the state_dict
+                state_dict = checkpoint
+        else:
+            # If checkpoint is not a dict, assume it's directly the state_dict
+            state_dict = checkpoint
+
+        if state_dict is None:
+            raise ValueError(f"Could not find model state_dict in the checkpoint '{args.load_checkpoint}'. "
+                             "Expected a dictionary with 'state_dict' or 'net' key, or the state_dict directly.")
+
+        # Remove 'module.' prefix if saved from DataParallel
+        new_state_dict = {}
+        for k, v in state_dict.items():
+            if k.startswith('module.'):
+                new_state_dict[k[7:]] = v # remove 'module.' prefix
+            else:
+                new_state_dict[k] = v
+
+        model.load_state_dict(new_state_dict)
+        print("Custom checkpoint loaded successfully.")
+    else:
+        print("\n--- Loading default pre-trained ResNet18 model from torchvision ---")
+        # Using the recommended way to load ImageNet-1K V1 weights
+        model = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
+        print("Default pre-trained model loaded.")
     
     # Ensure the model is moved to the correct device
     model = model.to(device)
@@ -186,20 +235,20 @@ if __name__ == '__main__':
         model = nn.DataParallel(model)
 
     # 3. Evaluate the model on the Validation Set
-    print("\n--- Evaluating Pre-trained Model on ImageNet Validation Set ---")
-    val_loss, top1_acc, top5_acc = test_model(model, val_loader, "ImageNet Pre-trained ResNet18 Validation")
+    print("\n--- Evaluating Model on ImageNet Validation Set ---")
+    val_loss, top1_acc, top5_acc = test_model(model, val_loader, "ImageNet ResNet18 Validation")
 
     print("\n--- Evaluation Complete ---")
-    print(f"Pre-trained ResNet18 Final Results:")
+    print(f"ResNet18 Final Results:")
     print(f"  Loss: {val_loss:.4f}")
     print(f"  Top-1 Accuracy: {top1_acc:.2f}%")
     print(f"  Top-5 Accuracy: {top5_acc:.2f}%")
     # Note: torchvision's reported accuracy for ResNet18 IMAGENET1K_V1 is 69.758% Top-1 and 89.078% Top-5.
     # Your result might vary slightly due to data loading, specific PyTorch/CUDA versions, etc.
 
-    # 4. Save the Pre-trained Model (optional)
+    # 4. Save the Model (optional)
     if args.save_model:
-        print(f"\n--- Saving the pre-trained model to {args.save_path} ---")
+        print(f"\n--- Saving the current model to {args.save_path} ---")
         # Create checkpoint directory if it doesn't exist
         os.makedirs(os.path.dirname(args.save_path), exist_ok=True)
         
@@ -207,6 +256,6 @@ if __name__ == '__main__':
         # If the model was wrapped in DataParallel, unwrap it before saving
         save_state_dict = model.module.state_dict() if isinstance(model, nn.DataParallel) else model.state_dict()
         torch.save(save_state_dict, args.save_path)
-        print("Pre-trained model saved successfully.")
+        print("Model saved successfully.")
     else:
         print("\n--- Skipping model saving (use --save_model to enable) ---")
